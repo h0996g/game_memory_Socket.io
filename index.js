@@ -35,7 +35,8 @@ io.on('connection', (socket) => {
         rooms[roomId] = {
             creator: socket.id,
             players: [socket.id],
-            gameState: null
+            gameState: null,
+            restartVotes: new Set()
         };
         socket.join(roomId);
         console.log('Room created:', roomId);
@@ -92,44 +93,68 @@ io.on('connection', (socket) => {
         const roomId = data.roomId;
 
         if (rooms[roomId] && rooms[roomId].gameState) {
-            const previousState = rooms[roomId].gameState;
             rooms[roomId].gameState = data;
-
-            const newlyFlippedIndices = data.flipped.reduce((acc, flipped, index) => {
-                if (flipped && !previousState.flipped[index]) acc.push(index);
-                return acc;
-            }, []);
-
-            if (newlyFlippedIndices.length === 2) {
-                const [index1, index2] = newlyFlippedIndices;
-                if (data.numbers[index1] !== data.numbers[index2]) {
-                    rooms[roomId].gameState.flipped[index1] = false;
-                    rooms[roomId].gameState.flipped[index2] = false;
-                    rooms[roomId].gameState.currentPlayer = 3 - rooms[roomId].gameState.currentPlayer;
-                }
-            }
-
             io.to(roomId).emit('gameState', rooms[roomId].gameState);
         } else {
             console.error('Error: Room not found or game not started for updateGameState event');
         }
     });
 
-    socket.on('restartGame', (data) => {
-        console.log('restartGame event received:', data);
-        const roomId = data.roomId;
+    socket.on('gameEnded', (data) => {
+        console.log('gameEnded event received:', data);
+        const { roomId, winner } = data;
 
         if (rooms[roomId]) {
-            const gameState = generateGameState();
-            rooms[roomId].gameState = gameState;
-
-            io.to(roomId).emit('gameRestarted', {
-                gameState: gameState,
-                startingPlayer: 1
-            });
-            console.log('gameRestarted event emitted to room:', roomId);
+            io.to(roomId).emit('gameEnded', { winner });
+            console.log('gameEnded event emitted to room:', roomId);
         } else {
-            console.log('Error: Room not found for restartGame event');
+            console.log('Error: Room not found for gameEnded event');
+        }
+    });
+
+    socket.on('playerWantsRestart', (data) => {
+        console.log('playerWantsRestart event received:', data);
+        const { roomId } = data;
+
+        if (rooms[roomId]) {
+            rooms[roomId].restartVotes.add(socket.id);
+
+            if (rooms[roomId].restartVotes.size === 2) {
+                // Both players want to restart
+                const gameState = generateGameState();
+                rooms[roomId].gameState = gameState;
+                rooms[roomId].restartVotes.clear();
+
+                io.to(roomId).emit('gameRestarted', {
+                    gameState: gameState,
+                    startingPlayer: 1
+                });
+                console.log('gameRestarted event emitted to room:', roomId);
+            } else {
+                // Notify the other player that this player wants to restart
+                const opponentId = rooms[roomId].players.find(id => id !== socket.id);
+                if (opponentId) {
+                    io.to(opponentId).emit('opponentWantsRestart');
+                }
+            }
+        } else {
+            console.log('Error: Room not found for playerWantsRestart event');
+        }
+    });
+
+    socket.on('playerQuit', (data) => {
+        console.log('playerQuit event received:', data);
+        const { roomId } = data;
+
+        if (rooms[roomId]) {
+            const opponentId = rooms[roomId].players.find(id => id !== socket.id);
+            if (opponentId) {
+                io.to(opponentId).emit('opponentQuit');
+            }
+            delete rooms[roomId];
+            console.log('Room', roomId, 'closed due to player quitting');
+        } else {
+            console.log('Error: Room not found for playerQuit event');
         }
     });
 
@@ -150,9 +175,8 @@ io.on('connection', (socket) => {
     });
 });
 
-
 app.get('/', (req, res) => {
-    res.send('Memory Game Server is running render');
+    res.send('Memory Game Server is running');
 });
 
 http.listen(PORT, () => {
