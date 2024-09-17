@@ -77,29 +77,45 @@ io.on('connection', (socket) => {
         const index = data.index;
 
         if (games[gameId]) {
-            const currentPlayer = games[gameId].currentPlayer;
-            const opponentId = games[gameId].players.find(id => id !== socket.id);
+            games[gameId].gameState.flipped[index] = true;
 
-            // Switch the turn to the opponent
-            games[gameId].currentPlayer = games[gameId].currentPlayer === 1 ? 2 : 1;
-
-            socket.to(gameId).emit('cardFlipped', { index: index });
-            io.to(opponentId).emit('gameState', { currentPlayer: games[gameId].currentPlayer });
-            console.log('cardFlipped event emitted to game:', gameId);
+            // Broadcast the updated game state to both players
+            io.to(gameId).emit('gameState', games[gameId].gameState);
         } else {
             console.log('Error: Game not found for flipCard event');
         }
     });
+
+
     socket.on('updateGameState', (data) => {
         console.log('updateGameState event received:', data);
         const gameId = data.gameId;
 
         if (games[gameId]) {
+            const previousState = games[gameId].gameState;
             games[gameId].gameState = data;
-            io.to(gameId).emit('gameState', data);  // Broadcast to both players
-            console.log('gameState event emitted to game:', gameId);
+
+            // Check for newly flipped cards
+            const newlyFlippedIndices = data.flipped.reduce((acc, flipped, index) => {
+                if (flipped && !previousState.flipped[index]) acc.push(index);
+                return acc;
+            }, []);
+
+            if (newlyFlippedIndices.length === 2) {
+                const [index1, index2] = newlyFlippedIndices;
+                if (data.numbers[index1] !== data.numbers[index2]) {
+                    // Non-matching pair found
+                    games[gameId].gameState.flipped[index1] = false;
+                    games[gameId].gameState.flipped[index2] = false;
+                    games[gameId].gameState.currentPlayer = 3 - games[gameId].gameState.currentPlayer; // Switch player
+                }
+                // If it's a matching pair, we don't need to do anything special here
+            }
+
+            // Broadcast the updated game state to both players
+            io.to(gameId).emit('gameState', games[gameId].gameState);
         } else {
-            console.log('Error: Game not found for updateGameState event');
+            console.error('Error: Game not found for updateGameState event');
         }
     });
 
