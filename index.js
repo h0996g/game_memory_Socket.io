@@ -5,8 +5,7 @@ const io = require('socket.io')(http);
 
 const PORT = process.env.PORT || 3000;
 
-let waitingPlayer = null;
-let games = {};
+let rooms = {};
 
 function generateGameState() {
     const numbers = Array.from({ length: 16 }, (_, i) => Math.floor(i / 2) + 1);
@@ -31,71 +30,71 @@ function shuffleArray(array) {
 io.on('connection', (socket) => {
     console.log('A user connected with ID:', socket.id);
 
-    socket.on('joinGame', (data) => {
-        console.log('joinGame event received from', socket.id, 'with data:', data);
-        const playerId = data.playerId;
+    socket.on('createRoom', (data) => {
+        const roomId = Math.random().toString(36).substring(7);
+        rooms[roomId] = {
+            creator: socket.id,
+            players: [socket.id],
+            gameState: null
+        };
+        socket.join(roomId);
+        console.log('Room created:', roomId);
+        socket.emit('roomCreated', { roomId: roomId });
+    });
 
-        if (waitingPlayer) {
-            console.log('Matching', socket.id, 'with waiting player', waitingPlayer.id);
-            const gameId = Math.random().toString(36).substring(7);
-            socket.join(gameId);
-            waitingPlayer.join(gameId);
+    socket.on('joinRoom', (data) => {
+        const roomId = data.roomId;
+        console.log('Attempt to join room:', roomId);
+        if (rooms[roomId] && rooms[roomId].players.length < 2) {
+            socket.join(roomId);
+            rooms[roomId].players.push(socket.id);
 
-            const gameState = generateGameState();
-            games[gameId] = {
-                players: [waitingPlayer.id, socket.id],
-                gameState: gameState,
-                currentPlayer: 1
-            };
+            if (rooms[roomId].players.length === 2) {
+                const gameState = generateGameState();
+                rooms[roomId].gameState = gameState;
 
-            console.log('Emitting gameJoined event to', waitingPlayer.id);
-            io.to(waitingPlayer.id).emit('gameJoined', {
-                gameId: gameId,
-                opponentId: socket.id,
-                isFirstPlayer: true,
-                gameState: gameState
-            });
-            console.log('Emitting gameJoined event to', socket.id);
-            io.to(socket.id).emit('gameJoined', {
-                gameId: gameId,
-                opponentId: waitingPlayer.id,
-                isFirstPlayer: false,
-                gameState: gameState
-            });
-
-            waitingPlayer = null;
+                io.to(rooms[roomId].players[0]).emit('gameJoined', {
+                    roomId: roomId,
+                    opponentId: rooms[roomId].players[1],
+                    isFirstPlayer: true,
+                    gameState: gameState
+                });
+                io.to(rooms[roomId].players[1]).emit('gameJoined', {
+                    roomId: roomId,
+                    opponentId: rooms[roomId].players[0],
+                    isFirstPlayer: false,
+                    gameState: gameState
+                });
+                console.log('Game started in room:', roomId);
+            } else {
+                socket.emit('waitingForOpponent', { roomId: roomId });
+            }
         } else {
-            console.log('No waiting player. ', socket.id, 'is now waiting.');
-            waitingPlayer = socket;
-            socket.emit('waiting');
+            socket.emit('roomJoinError', { message: 'Room not found or full' });
         }
     });
 
     socket.on('flipCard', (data) => {
         console.log('flipCard event received:', data);
-        const gameId = data.gameId;
+        const roomId = data.roomId;
         const index = data.index;
 
-        if (games[gameId]) {
-            games[gameId].gameState.flipped[index] = true;
-
-            // Broadcast the updated game state to both players
-            io.to(gameId).emit('gameState', games[gameId].gameState);
+        if (rooms[roomId] && rooms[roomId].gameState) {
+            rooms[roomId].gameState.flipped[index] = true;
+            io.to(roomId).emit('gameState', rooms[roomId].gameState);
         } else {
-            console.log('Error: Game not found for flipCard event');
+            console.log('Error: Room not found or game not started for flipCard event');
         }
     });
 
-
     socket.on('updateGameState', (data) => {
         console.log('updateGameState event received:', data);
-        const gameId = data.gameId;
+        const roomId = data.roomId;
 
-        if (games[gameId]) {
-            const previousState = games[gameId].gameState;
-            games[gameId].gameState = data;
+        if (rooms[roomId] && rooms[roomId].gameState) {
+            const previousState = rooms[roomId].gameState;
+            rooms[roomId].gameState = data;
 
-            // Check for newly flipped cards
             const newlyFlippedIndices = data.flipped.reduce((acc, flipped, index) => {
                 if (flipped && !previousState.flipped[index]) acc.push(index);
                 return acc;
@@ -104,53 +103,48 @@ io.on('connection', (socket) => {
             if (newlyFlippedIndices.length === 2) {
                 const [index1, index2] = newlyFlippedIndices;
                 if (data.numbers[index1] !== data.numbers[index2]) {
-                    // Non-matching pair found
-                    games[gameId].gameState.flipped[index1] = false;
-                    games[gameId].gameState.flipped[index2] = false;
-                    games[gameId].gameState.currentPlayer = 3 - games[gameId].gameState.currentPlayer; // Switch player
+                    rooms[roomId].gameState.flipped[index1] = false;
+                    rooms[roomId].gameState.flipped[index2] = false;
+                    rooms[roomId].gameState.currentPlayer = 3 - rooms[roomId].gameState.currentPlayer;
                 }
-                // If it's a matching pair, we don't need to do anything special here
             }
 
-            // Broadcast the updated game state to both players
-            io.to(gameId).emit('gameState', games[gameId].gameState);
+            io.to(roomId).emit('gameState', rooms[roomId].gameState);
         } else {
-            console.error('Error: Game not found for updateGameState event');
+            console.error('Error: Room not found or game not started for updateGameState event');
         }
     });
 
     socket.on('restartGame', (data) => {
         console.log('restartGame event received:', data);
-        const gameId = data.gameId;
+        const roomId = data.roomId;
 
-        if (games[gameId]) {
+        if (rooms[roomId]) {
             const gameState = generateGameState();
-            games[gameId].gameState = gameState;
-            games[gameId].currentPlayer = 1;
+            rooms[roomId].gameState = gameState;
 
-            io.to(gameId).emit('gameRestarted', {
+            io.to(roomId).emit('gameRestarted', {
                 gameState: gameState,
-                startingPlayer: games[gameId].currentPlayer
+                startingPlayer: 1
             });
-            console.log('gameRestarted event emitted to game:', gameId);
+            console.log('gameRestarted event emitted to room:', roomId);
         } else {
-            console.log('Error: Game not found for restartGame event');
+            console.log('Error: Room not found for restartGame event');
         }
     });
 
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
-        if (waitingPlayer && waitingPlayer.id === socket.id) {
-            waitingPlayer = null;
-        }
 
-        Object.keys(games).forEach(gameId => {
-            const game = games[gameId];
-            if (game.players.includes(socket.id)) {
-                const opponentId = game.players.find(id => id !== socket.id);
-                io.to(opponentId).emit('opponentDisconnected');
-                delete games[gameId];
-                console.log('Game', gameId, 'ended due to player disconnect');
+        Object.keys(rooms).forEach(roomId => {
+            const room = rooms[roomId];
+            if (room.players.includes(socket.id)) {
+                const opponentId = room.players.find(id => id !== socket.id);
+                if (opponentId) {
+                    io.to(opponentId).emit('opponentDisconnected');
+                }
+                delete rooms[roomId];
+                console.log('Room', roomId, 'closed due to player disconnect');
             }
         });
     });
