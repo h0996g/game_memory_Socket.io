@@ -150,8 +150,9 @@ io.on('connection', (socket) => {
     });
 });
 
+
 app.get('/', (req, res) => {
-    res.send('Memory Game Server is running');
+    res.send('Memory Game Server is running render');
 });
 
 http.listen(PORT, () => {
